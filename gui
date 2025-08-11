@@ -1,0 +1,426 @@
+import tkinter as tk
+from tkinter import ttk, scrolledtext, Listbox, messagebox, filedialog
+from scapy.all import sniff, IP, TCP, UDP, ICMP, get_if_list
+import threading
+import io
+import contextlib
+import datetime
+import csv
+import matplotlib
+matplotlib.use("TkAgg")  # Use TkAgg backend
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+import json
+
+class PacketSnifferGUI:
+    def __init__(self, root):
+        # Load configuration from file
+        self.load_config()
+
+        self.root = root
+        self.root.title("Cybersecurity Packet Sniffer")
+        self.root.geometry("800x600")
+        self.root.configure(bg="#1e1e1e")
+        
+        self.running = False
+        self.thread = None
+        self.selected_protocol = tk.StringVar(value="All")
+        self.selected_interface = tk.StringVar()
+        self.packet_list = []  # Store packet summaries
+        self.interfaces = get_if_list()
+        if self.interfaces:
+            self.selected_interface.set(self.interfaces[0])
+
+        print("Available interfaces:", self.interfaces) # ADDED
+        self.start_time = None
+        self.total_packets = 0
+        self.current_theme = "dark"  # Default theme
+        self.style = ttk.Style()
+        self.style.theme_use('clam')  # Default theme
+        self.setup_themes()
+
+        self.packet_counts = []
+        self.time_window = 20  # Number of seconds to display
+        self.setup_graph()
+
+        self.setup_widgets()
+        self.update_status_bar()
+
+    def setup_themes(self):
+        self.style.configure("Dark.TLabel", background="#1e1e1e", foreground="white")
+        self.style.configure("Dark.TButton", background="#333333", foreground="white")
+        self.style.configure("Dark.TEntry", fieldbackground="#2e2e2e", foreground="white")
+        self.style.configure("Dark.TCombobox", fieldbackground="#2e2e2e", foreground="white")
+        self.style.configure("Light.TLabel", background="#f0f0f0", foreground="black")
+        self.style.configure("Light.TButton", background="#e0e0e0", foreground="black")
+        self.style.configure("Light.TEntry", fieldbackground="white", foreground="black")
+        self.style.configure("Light.TCombobox", fieldbackground="white", foreground="black")
+
+    def setup_widgets(self):
+        self.title = tk.Label(self.root, text="Network Packet Sniffer", font=("Helvetica", 20, "bold"))
+        self.title.pack(pady=10)
+
+        # Protocol filter dropdown
+        protocol_frame = tk.Frame(self.root, bg="#1e1e1e")
+        protocol_frame.pack(pady=5)
+
+        tk.Label(protocol_frame, text="Protocol Filter:", bg="#1e1e1e", fg="white", font=("Helvetica", 12)).pack(side=tk.LEFT, padx=5)
+        self.protocol_menu = ttk.Combobox(protocol_frame, textvariable=self.selected_protocol, values=["All", "TCP", "UDP", "ICMP"], state="readonly")
+        self.protocol_menu.pack(side=tk.LEFT)
+
+        # Interface selection
+        interface_frame = tk.Frame(self.root, bg="#1e1e1e")
+        interface_frame.pack(pady=5)
+
+        tk.Label(interface_frame, text="Interface:", bg="#1e1e1e", fg="white", font=("Helvetica", 12)).pack(side=tk.LEFT, padx=5)
+        self.interface_menu = ttk.Combobox(interface_frame, textvariable=self.selected_interface, values=self.interfaces, state="readonly")
+        self.interface_menu.pack(side=tk.LEFT)
+
+        # Start and Stop buttons
+        button_frame = tk.Frame(self.root, bg="#1e1e1e")
+        button_frame.pack(pady=10)
+
+        self.start_button = ttk.Button(button_frame, text="Start Sniffing", command=self.start_sniffing)
+        self.start_button.pack(side=tk.LEFT, padx=10)
+
+        self.stop_button = ttk.Button(button_frame, text="Stop Sniffing", command=self.stop_sniffing, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=10)
+
+        # Clear button
+        clear_button = ttk.Button(self.root, text="Clear Packets", command=self.clear_packets)
+        clear_button.pack(pady=5)
+
+        # Live packet list
+        self.packet_listbox = Listbox(self.root, width=100, height=10, bg="#2e2e2e", fg="white", font=("Courier", 10))
+        self.packet_listbox.pack(padx=10, pady=5)
+        self.packet_listbox.bind("<Double-Button-1>", self.view_packet_details)
+
+        # Output area
+        self.output_area = scrolledtext.ScrolledText(self.root, width=100, height=10, font=("Courier", 10))
+        self.output_area.pack(padx=10, pady=10)
+        self.output_area.insert(tk.END, "🔍 Waiting to start sniffing...\n")
+
+        # Search/Filter Bar
+        self.search_var = tk.StringVar()
+        search_frame = tk.Frame(self.root, bg="#1e1e1e")
+        search_frame.pack(pady=5, fill=tk.X, padx=10)
+        search_label = ttk.Label(search_frame, text="Search:")
+        search_label.pack(side=tk.LEFT)
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var, width=50)
+        self.search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.search_entry.bind("<KeyRelease>", self.apply_filter)
+
+        # Status Bar
+        self.status_bar = tk.Label(self.root, text="", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # Theme Toggle Button
+        self.theme_button = ttk.Button(self.root, text="Toggle Light Mode", command=self.toggle_theme)
+        self.theme_button.pack(pady=5)
+
+        # Export to CSV Button
+        self.export_button = ttk.Button(self.root, text="Export to CSV", command=self.export_to_csv)
+        self.export_button.pack(pady=5)
+
+        # Alerts area
+        self.alerts_area = scrolledtext.ScrolledText(self.root, width=100, height=5, font=("Courier", 10))
+        self.alerts_area.pack(padx=10, pady=5)
+        self.alerts_area.insert(tk.END, "⚠️ Suspicious Packet Alerts:\n")
+
+        self.apply_dark_theme()
+
+    def setup_graph(self):
+        self.graph_frame = tk.Frame(self.root, bg="#1e1e1e")
+        self.graph_frame.pack(pady=5, padx=10, fill=tk.BOTH, expand=True)
+
+        self.fig = Figure(figsize=(6, 2), dpi=100, facecolor="#1e1e1e")
+        self.ax = self.fig.add_subplot(111, facecolor="#1e1e1e")
+        self.ax.set_xlabel("Time (s)", color="white")
+        self.ax.set_ylabel("Packets/s", color="white")
+        self.ax.tick_params(axis='x', colors='white')
+        self.ax.tick_params(axis='y', colors='white')
+        self.ax.spines['top'].set_color('white')
+        self.ax.spines['bottom'].set_color('white')
+        self.ax.spines['left'].set_color('white')
+        self.ax.spines['right'].set_color('white')
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.graph_frame)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas.draw()
+
+    def start_sniffing(self):
+        self.running = True
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.output_area.insert(tk.END, "\n▶️ Sniffing started...\n")
+        self.output_area.see(tk.END)
+        self.start_time = datetime.datetime.now()
+        self.total_packets = 0
+        self.packet_counts = []
+        self.update_status_bar()
+
+        # Start sniffing in a thread
+        self.thread = threading.Thread(target=self.sniff_packets)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def stop_sniffing(self):
+        self.running = False
+        self.start_button.config(state=tk.NORMAL)
+        self.stop_button.config(state=tk.DISABLED)
+        self.output_area.insert(tk.END, "\n⛔ Sniffing stopped.\n")
+        self.output_area.see(tk.END)
+
+    def sniff_packets(self):
+        def process_packet(packet):
+            try:
+                # Simplified packet processing
+                if IP in packet:
+                    ip_layer = packet[IP]
+                    packet_summary = f"[IP] {ip_layer.src} -> {ip_layer.dst}"
+
+                    # Apply search filter
+                    search_text = self.search_var.get().lower()
+                    if search_text and search_text not in packet_summary.lower() and (hasattr(packet, 'load') and search_text not in str(packet.load).lower()):
+                        return  # Skip packets that don't match filter
+
+                    self.packet_list.append(packet)
+                    self.packet_listbox.insert(tk.END, packet_summary)
+                    self.packet_listbox.see(tk.END)
+                    self.total_packets += 1  # Increment total packets captured
+                    self.update_status_bar()
+                    self.check_suspicious(packet) # ADDED
+                    self.update_graph()
+            except Exception as e:
+                self.output_area.insert(tk.END, f"\nError processing packet: {e}\n")
+                self.output_area.see(tk.END)
+
+        try:
+            iface = self.selected_interface.get()
+            self.output_area.insert(tk.END, f"\nSniffing on interface: {iface}\n")
+            self.output_area.see(tk.END)
+            sniff(prn=process_packet, store=False, iface=iface,
+                  filter="")  # REMOVED FILTER
+        except Exception as e:
+            self.output_area.insert(tk.END, f"\nError during sniffing: {e}\n")
+            self.output_area.see(tk.END)
+            messagebox.showerror("Sniffing Error", str(e))
+            self.stop_sniffing()
+
+    def view_packet_details(self, event):
+        selected_index = self.packet_listbox.curselection()
+        if selected_index:
+            packet = self.packet_list[selected_index[0]]
+            # Redirect stdout to capture packet.show() output
+            with io.StringIO() as buf, contextlib.redirect_stdout(buf):
+                packet.show()
+                packet_details = buf.getvalue()
+            self.output_area.delete("1.0", tk.END)  # Clear previous details
+            self.output_area.insert(tk.END, packet_details)
+
+    def clear_packets(self):
+        self.packet_list.clear()
+        self.packet_listbox.delete(0, tk.END)
+
+    def get_bpf_filter(self):
+        proto = self.selected_protocol.get()
+        if proto == "All":
+            return ""
+        else:
+            return "" # MODIFIED
+
+    def check_suspicious(self, packet):
+        try:
+            if IP in packet:
+                ip_layer = packet[IP]
+                src_ip = ip_layer.src
+                dst_ip = ip_layer.dst
+                payload_size = len(packet)
+
+                # Suspicious IP check
+                if dst_ip in self.suspicious_ips:
+                    self.display_alert(f"[{datetime.datetime.now()}] Suspicious IP: Destination IP {dst_ip} is blacklisted. Source: {src_ip}")
+
+                # Unusual port check
+                src_port = None
+                dst_port = None
+                if TCP in packet:
+                    src_port = packet[TCP].sport
+                    dst_port = packet[TCP].dport
+                elif UDP in packet:
+                    src_port = packet[UDP].sport
+                    dst_port = packet[UDP].dport
+
+                if src_port and (src_port not in range(1, 1025) and src_port != 8080):
+                     self.display_alert(f"[{datetime.datetime.now()}] Unusual Port: Source port {src_port} is outside the typical range. Destination: {dst_ip}")
+                if dst_port and (dst_port not in range(1, 1025) and dst_port != 8080):
+                    self.display_alert(f"[{datetime.datetime.now()}] Unusual Port: Destination port {dst_port} is outside the typical range. Source: {src_ip}")
+
+                # Large payload check
+                if payload_size > 1000:
+                    self.display_alert(f"[{datetime.datetime.now()}] Large Payload: Packet size is {payload_size} bytes. Source: {src_ip} Destination: {dst_ip}")
+
+                # SYN Flood Detection
+                if TCP in packet and packet[TCP].flags == 'S':
+                    now = datetime.datetime.now()
+                    if src_ip not in self.syn_flood_sources:
+                        self.syn_flood_sources[src_ip] = []
+                    self.syn_flood_sources[src_ip].append(now)
+                    # Remove old entries
+                    self.syn_flood_sources[src_ip] = [ts for ts in self.syn_flood_sources[src_ip] if (now - ts).total_seconds() <= 1]
+                    if len(self.syn_flood_sources[src_ip]) > self.syn_flood_threshold:
+                        self.display_alert(f"[{datetime.datetime.now()}] SYN Flood: High rate of SYN packets from {src_ip}")
+
+                # XMAS Scan Detection
+                if TCP in packet and str(packet[TCP].flags) == 'FPU':
+                    self.display_alert(f"[{datetime.datetime.now()}] XMAS Scan: Multiple TCP flags set (FIN, PSH, URG) from {src_ip} to {dst_ip}")
+
+                # Null Scan Detection
+                if TCP in packet and str(packet[TCP].flags) == '':
+                    self.display_alert(f"[{datetime.datetime.now()}] Null Scan: No TCP flags set from {src_ip} to {dst_ip}")
+
+                # DNS Amplification Detection
+                if UDP in packet and packet[UDP].dport == 53 and payload_size > 512:
+                    self.display_alert(f"[{datetime.datetime.now()}] DNS Amplification: Large DNS response from {src_ip} to {dst_ip}")
+
+        except Exception as e:
+            self.output_area.insert(tk.END, f"\nError checking suspicious packet: {e}\n")
+            self.output_area.see(tk.END)
+
+    def display_alert(self, message):
+        self.alerts_area.insert(tk.END, f"\n{message}\n")
+        self.alerts_area.see(tk.END)
+
+    def apply_filter(self, event=None):
+        self.packet_listbox.delete(0, tk.END)  # Clear the listbox
+        search_text = self.search_var.get().lower()
+        for packet in self.packet_list:
+            try:
+                if IP in packet:
+                    ip_layer = packet[IP]
+                    packet_summary = f"[IP] {ip_layer.src} -> {ip_layer.dst}"
+                    if search_text in packet_summary.lower() or (hasattr(packet, 'load') and search_text in str(packet.load).lower()):
+                        self.packet_listbox.insert(tk.END, packet_summary)
+            except:
+                pass
+
+    def update_status_bar(self):
+        if self.start_time:
+            duration = datetime.datetime.now() - self.start_time
+            duration_str = str(duration).split('.')[0]  # Remove microseconds
+        else:
+            duration_str = "0:00:00"
+        protocol_filter = self.selected_protocol.get()
+        status_text = f"Total Packets: {self.total_packets} | Protocol Filter: {protocol_filter} | Session Duration: {duration_str}"
+        self.status_bar.config(text=status_text)
+        self.root.after(1000, self.update_status_bar)  # Update every 1 second
+
+    def toggle_theme(self):
+        if self.current_theme == "dark":
+            self.apply_light_theme()
+            self.current_theme = "light"
+            self.theme_button.config(text="Toggle Dark Mode")
+        else:
+            self.apply_dark_theme()
+            self.current_theme = "dark"
+            self.theme_button.config(text="Toggle Light Mode")
+
+    def apply_light_theme(self):
+        self.style.theme_use('alt')
+        self.root.configure(bg="#f0f0f0")
+        # Update colors for all widgets as needed
+        self.output_area.config(bg="white", fg="black")
+        self.alerts_area.config(bg="#dddddd", fg="black")
+        self.packet_listbox.config(bg="white", fg="black")
+        self.status_bar.config(bg="#e0e0e0", fg="black")
+        self.title.config(bg="#f0f0f0", fg="black")
+
+    def apply_dark_theme(self):
+        self.style.theme_use('clam')
+        self.root.configure(bg="#1e1e1e")
+        # Update colors for all widgets as needed
+        self.output_area.config(bg="#2e2e2e", fg="lime")
+        self.alerts_area.config(bg="#404040", fg="yellow")
+        self.packet_listbox.config(bg="#2e2e2e", fg="white")
+        self.status_bar.config(bg="#333333", fg="white")
+        self.title.config(bg="#1e1e1e", fg="white")
+
+    def export_to_csv(self):
+        if not self.packet_list:
+            messagebox.showinfo("Info", "No packets to export.")
+            return
+
+        filepath = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
+        if not filepath:
+            return  # User cancelled
+
+        try:
+            with open(filepath, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(["Timestamp", "Source IP", "Destination IP", "Protocol", "Payload"])  # Header
+
+                for packet in self.packet_list:
+                    if IP in packet:
+                        ip_layer = packet[IP]
+                        timestamp = datetime.datetime.now().isoformat()
+                        src_ip = ip_layer.src
+                        dst_ip = ip_layer.dst
+                        protocol = packet.summary()
+                        payload = ""
+                        if hasattr(packet, "load"):
+                            payload = str(packet.load)
+                        writer.writerow([timestamp, src_ip, dst_ip, protocol, payload])
+
+            messagebox.showinfo("Info", f"Exported {len(self.packet_list)} packets to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error exporting to CSV: {e}")
+
+    def update_graph(self):
+        now = datetime.datetime.now()
+        self.packet_counts.append(now)
+        # Remove old entries
+        self.packet_counts = [ts for ts in self.packet_counts if (now - ts).total_seconds() <= self.time_window]
+        packet_rate = len(self.packet_counts) / self.time_window
+
+        self.ax.cla()
+        self.ax.set_xlabel("Time (s)", color="white")
+        self.ax.set_ylabel("Packets/s", color="white")
+        self.ax.tick_params(axis='x', colors='white')
+        self.ax.tick_params(axis='y', colors='white')
+        self.ax.spines['top'].set_color('white')
+        self.ax.spines['bottom'].set_color('white')
+        self.ax.spines['left'].set_color('white')
+        self.ax.spines['right'].set_color('white')
+        self.ax.set_facecolor("#1e1e1e")
+        self.fig.patch.set_facecolor("#1e1e1e")
+
+        time_values = [(ts - now).total_seconds() + self.time_window for ts in self.packet_counts]
+        self.ax.plot(time_values, [1] * len(self.packet_counts), color='lime', linewidth=1)
+        self.ax.set_xlim(0, self.time_window)
+        self.ax.set_ylim(0, packet_rate * 2 if packet_rate > 0 else 2)  # Adjust y-axis limit
+
+        self.canvas.draw()
+
+    def load_config(self):
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+                self.suspicious_ips = config.get("suspicious_ips", [])
+                self.syn_flood_threshold = config.get("syn_flood_threshold", 10)
+                default_interface = config.get("interface", None)
+                if default_interface and default_interface in self.interfaces:
+                    self.selected_interface.set(default_interface)
+        except FileNotFoundError:
+            messagebox.showerror("Error", "config.json not found. Using default settings.")
+            self.suspicious_ips = []
+            self.syn_flood_threshold = 10
+        except json.JSONDecodeError:
+            messagebox.showerror("Error", "Invalid JSON in config.json. Using default settings.")
+            self.suspicious_ips = []
+            self.syn_flood_threshold = 10
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PacketSnifferGUI(root)
+    root.mainloop()
